@@ -1,0 +1,41 @@
+name: Package Blender-OFF Addon
+
+on:
+  push:
+    branches: [ "main" ]
+  release:
+    types: [ created ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Bundle
+        run: |
+          mkdir -p build/Blender-OFF
+          cp __init__.py build/Blender-OFF/
+          cp README.md build/Blender-OFF/
+          cd build
+          zip -r ${{ github.workspace }}/Blender-OFF.zip Blender-OFF
+          cd ..
+          
+      - name: Upload Artifact to GitHub Action Run
+        uses: actions/upload-artifact@v4
+        with:
+          name: Blender-OFF
+          path: build/
+
+      - name: Attach Zip to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "${{ github.workspace }}/Blender-OFF.zip"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
