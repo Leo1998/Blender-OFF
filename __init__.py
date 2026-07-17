@@ -1,4 +1,5 @@
 import os
+import struct
 import bpy
 import mathutils
 from bpy.props import (
@@ -22,52 +23,102 @@ bl_info = {
 }
 
 def load_off(filepath, context, global_matrix, import_colors=True, import_uvs=True):
-    with open(filepath, 'r') as f:
-        lines = [line.split('#')[0].strip() for line in f if line.split('#')[0].strip()]
+    is_binary = False
+    with open(filepath, 'rb') as f:
+        first_line = f.readline()
+        if b'BINARY' in first_line.upper():
+            is_binary = True
 
-    if not lines:
-        return None
-
-    tokens = lines[0].split()
-    header = tokens[0].upper()
-    has_colors = 'C' in header
-    has_uvs = 'ST' in header
-
-    data_idx = 1
-    if len(tokens) >= 4:
-        vcount, fcount = int(tokens[1]), int(tokens[2])
+    if is_binary:
+        with open(filepath, 'rb') as f:
+            content = f.read()
+            idx = content.find(b'\n') + 1
+            
+            header_tokens = first_line.decode('ascii', errors='ignore').split()
+            header = header_tokens[0].upper()
+            has_colors = 'C' in header
+            has_uvs = 'ST' in header
+            
+            while idx < len(content) and content[idx:idx+1] == b'#':
+                idx = content.find(b'\n', idx) + 1
+                
+            test_val = struct.unpack_from('<i', content, idx)[0]
+            endian = '<' if 0 <= test_val < 100000000 else '>'
+            
+            vcount, fcount, _ = struct.unpack_from(endian + '3i', content, idx)
+            idx += 12
+            
+            verts, vert_colors, vert_uvs = [], [], []
+            for _ in range(vcount):
+                verts.append(struct.unpack_from(endian + '3f', content, idx))
+                idx += 12
+                
+                if has_colors and not has_uvs:
+                    vert_colors.append(struct.unpack_from(endian + '4f', content, idx))
+                    idx += 16
+                elif has_uvs and not has_colors:
+                    vert_uvs.append(struct.unpack_from(endian + '2f', content, idx))
+                    idx += 8
+                elif has_uvs and has_colors:
+                    u, v, r, g, b, a = struct.unpack_from(endian + '6f', content, idx)
+                    vert_uvs.append((u, v))
+                    vert_colors.append((r, g, b, a))
+                    idx += 24
+                    
+            facets = []
+            for _ in range(fcount):
+                nv = struct.unpack_from(endian + 'i', content, idx)[0]
+                idx += 4
+                face_indices = struct.unpack_from(endian + str(nv) + 'i', content, idx)
+                facets.append(list(face_indices))
+                idx += 4 * nv
     else:
-        counts = lines[data_idx].split()
-        vcount, fcount = int(counts[0]), int(counts[1])
-        data_idx += 1
+        with open(filepath, 'r') as f:
+            lines = [line.split('#')[0].strip() for line in f if line.split('#')[0].strip()]
 
-    verts, vert_colors, vert_uvs = [], [], []
+        if not lines:
+            return None
 
-    for _ in range(vcount):
-        bits = [float(x) for x in lines[data_idx].split()]
-        verts.append((bits[0], bits[1], bits[2]))
+        tokens = lines[0].split()
+        header = tokens[0].upper()
+        has_colors = 'C' in header
+        has_uvs = 'ST' in header
 
-        if has_colors and not has_uvs and len(bits) >= 6:
-            r, g, b = bits[3:6]
-            a = bits[6] if len(bits) > 6 else 1.0
-            vert_colors.append((r, g, b, a))
-        elif has_uvs and not has_colors and len(bits) >= 5:
-            vert_uvs.append((bits[3], bits[4]))
-        elif has_uvs and has_colors and len(bits) >= 7:
-            vert_uvs.append((bits[3], bits[4]))
-            r, g, b = bits[5:8]
-            a = bits[8] if len(bits) > 8 else 1.0
-            vert_colors.append((r, g, b, a))
+        data_idx = 1
+        if len(tokens) >= 4:
+            vcount, fcount = int(tokens[1]), int(tokens[2])
+        else:
+            counts = lines[data_idx].split()
+            vcount, fcount = int(counts[0]), int(counts[1])
+            data_idx += 1
 
-        data_idx += 1
+        verts, vert_colors, vert_uvs = [], [], []
 
-    facets = []
-    for _ in range(fcount):
-        splitted = lines[data_idx].split()
-        n = int(splitted[0])
-        ids = [int(idx) for idx in splitted[1:n+1]]
-        facets.append(ids)
-        data_idx += 1
+        for _ in range(vcount):
+            bits = [float(x) for x in lines[data_idx].split()]
+            verts.append((bits[0], bits[1], bits[2]))
+
+            if has_colors and not has_uvs and len(bits) >= 6:
+                r, g, b = bits[3:6]
+                a = bits[6] if len(bits) > 6 else 1.0
+                vert_colors.append((r, g, b, a))
+            elif has_uvs and not has_colors and len(bits) >= 5:
+                vert_uvs.append((bits[3], bits[4]))
+            elif has_uvs and has_colors and len(bits) >= 7:
+                vert_uvs.append((bits[3], bits[4]))
+                r, g, b = bits[5:8]
+                a = bits[8] if len(bits) > 8 else 1.0
+                vert_colors.append((r, g, b, a))
+
+            data_idx += 1
+
+        facets = []
+        for _ in range(fcount):
+            splitted = lines[data_idx].split()
+            n = int(splitted[0])
+            ids = [int(idx) for idx in splitted[1:n+1]]
+            facets.append(ids)
+            data_idx += 1
 
     off_name = bpy.path.display_name_from_filepath(filepath)
     mesh = bpy.data.meshes.new(name=off_name)
@@ -104,7 +155,7 @@ def load_off(filepath, context, global_matrix, import_colors=True, import_uvs=Tr
     context.view_layer.objects.active = obj
 
 
-def save_off(filepath, context, global_matrix, use_colors, use_uvs):
+def save_off(filepath, context, global_matrix, use_colors, use_uvs, use_binary=False):
     obj = context.view_layer.objects.active
     if not obj or obj.type != 'MESH':
         return {'CANCELLED'}
@@ -142,22 +193,40 @@ def save_off(filepath, context, global_matrix, use_colors, use_uvs):
     if use_colors and vert_colors: header = "C" + header
     if use_uvs and vert_uvs: header = "ST" + header
 
-    with open(filepath, 'w') as f:
-        f.write(header + '\n')
-        f.write(f"{len(verts)} {len(mesh.polygons)} 0\n")
+    if use_binary:
+        with open(filepath, 'wb') as f:
+            f.write(f"{header} BINARY\n".encode('ascii'))
+            f.write(struct.pack('<3i', len(verts), len(mesh.polygons), 0))
 
-        for i, v in enumerate(verts):
-            line = f"{v.co.x:.6f} {v.co.y:.6f} {v.co.z:.6f}"
-            if use_uvs and vert_uvs:
-                uv = vert_uvs.get(i, (0.0, 0.0))
-                line += f" {uv[0]:.6f} {uv[1]:.6f}"
-            if use_colors and vert_colors:
-                c = vert_colors.get(i, (255, 255, 255, 255))
-                line += f" {c[0]} {c[1]} {c[2]} {c[3]}"
-            f.write(line + '\n')
+            for i, v in enumerate(verts):
+                f.write(struct.pack('<3f', v.co.x, v.co.y, v.co.z))
+                if use_uvs and vert_uvs:
+                    uv = vert_uvs.get(i, (0.0, 0.0))
+                    f.write(struct.pack('<2f', uv[0], uv[1]))
+                if use_colors and vert_colors:
+                    c = vert_colors.get(i, (255, 255, 255, 255))
+                    f.write(struct.pack('<4f', c[0]/255.0, c[1]/255.0, c[2]/255.0, c[3]/255.0))
 
-        for poly in mesh.polygons:
-            f.write(f"{len(poly.vertices)} " + " ".join(str(v) for v in poly.vertices) + "\n")
+            for poly in mesh.polygons:
+                f.write(struct.pack('<i', len(poly.vertices)))
+                f.write(struct.pack(f'<{len(poly.vertices)}i', *poly.vertices))
+    else:
+        with open(filepath, 'w') as f:
+            f.write(header + '\n')
+            f.write(f"{len(verts)} {len(mesh.polygons)} 0\n")
+
+            for i, v in enumerate(verts):
+                line = f"{v.co.x:.6f} {v.co.y:.6f} {v.co.z:.6f}"
+                if use_uvs and vert_uvs:
+                    uv = vert_uvs.get(i, (0.0, 0.0))
+                    line += f" {uv[0]:.6f} {uv[1]:.6f}"
+                if use_colors and vert_colors:
+                    c = vert_colors.get(i, (255, 255, 255, 255))
+                    line += f" {c[0]} {c[1]} {c[2]} {c[3]}"
+                f.write(line + '\n')
+
+            for poly in mesh.polygons:
+                f.write(f"{len(poly.vertices)} " + " ".join(str(v) for v in poly.vertices) + "\n")
 
     obj.to_mesh_clear()
     return {'FINISHED'}
@@ -266,6 +335,11 @@ class ExportOFF(bpy.types.Operator, ExportHelper):
         description="Export the active UV layer",
         default=True,
     )
+    use_binary: BoolProperty(
+        name="Binary",
+        description="Export as Binary OFF",
+        default=False,
+    )
 
     def execute(self, context):
         global_matrix = axis_conversion(
@@ -273,8 +347,7 @@ class ExportOFF(bpy.types.Operator, ExportHelper):
             to_up=self.axis_up,
         ).to_4x4()
         
-        return save_off(self.filepath, context, global_matrix, self.use_colors, self.use_uvs)
-
+        return save_off(self.filepath, context, global_matrix, self.use_colors, self.use_uvs, self.use_binary)
 
 
 def menu_func_import(self, context):
